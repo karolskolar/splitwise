@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kalkulačka nákladov z dovolenky</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏔️</text></svg>">
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const generateId = () => Math.random().toString(36).substr(2, 9);
+
+// URL encoding/decoding for shareable links
+const encodeCalcData = (calc) => {
+  try {
+    const json = JSON.stringify(calc);
+    const base64 = btoa(unescape(encodeURIComponent(json)));
+    return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch (e) {
+    console.error('Failed to encode:', e);
+    return null;
+  }
+};
+
+const decodeCalcData = (encoded) => {
+  try {
+    let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4) base64 += '=';
+    const json = decodeURIComponent(escape(atob(base64)));
+    return JSON.parse(json);
+  } catch (e) {
+    console.error('Failed to decode:', e);
+    return null;
+  }
+};
+
+const defaultGroup = (type = 'group') => ({
+  id: generateId(),
+  name: '',
+  type: type,
+  members: [{ id: generateId(), name: '', isChild: false, coefficient: 1.0 }],
+  nights: 1,
+});
+
+const defaultExpense = () => ({
+  id: generateId(),
+  familyId: '',
+  category: 'food',
+  description: '',
+  amount: 0,
+});
+
+const defaultSettings = () => ({
+  accommodation: 'perPerson',
+  food: 'perPerson',
+  other: 'perFamily',
+});
+
+const defaultCalculation = () => ({
+  id: generateId(),
+  name: 'Nová dovolenka',
+  createdAt: new Date().toISOString(),
+  families: [defaultGroup(), defaultGroup()],
+  expenses: [],
+  settings: defaultSettings(),
+  notes: '',
+});
+
+// LocalStorage helpers
+const STORAGE_KEY = 'vacation-calculations';
+
+const saveToLocalStorage = (calculations) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(calculations));
+    return true;
+  } catch (e) {
+    console.error('Failed to save:', e);
+    return false;
+  }
+};
+
+const loadFromLocalStorage = () => {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch (e) {
+    console.error('Failed to load:', e);
+    return [];
+  }
+};
+
+// Calculation logic
+const getGroupLabel = (group) => {
+  if (group.name) return group.name;
+  return group.type === 'individual' ? 'Jednotlivec' : 'Skupina';
+};
+
+const calculateShares = (calculation) => {
+  const { families, expenses, settings = defaultSettings() } = calculation;
+  
+  const familyMetrics = families.map(family => {
+    const memberCount = family.members.length;
+    const bedNights = memberCount * family.nights;
+    const coefficientSum = family.members.reduce((sum, m) => sum + (m.coefficient || 1.0), 0);
+    const weightedUnits = coefficientSum * family.nights;
+    return { ...family, memberCount, bedNights, coefficientSum, weightedUnits };
+  });
+  
+  const totalFamilies = families.length;
+  const totalBedNights = familyMetrics.reduce((sum, f) => sum + f.bedNights, 0);
+  const totalWeightedUnits = familyMetrics.reduce((sum, f) => sum + f.weightedUnits, 0);
+  
+  const expensesByCategory = {
+    accommodation: expenses.filter(e => e.category === 'accommodation').reduce((sum, e) => sum + e.amount, 0),
+    food: expenses.filter(e => e.category === 'food').reduce((sum, e) => sum + e.amount, 0),
+    other: expenses.filter(e => e.category === 'other').reduce((sum, e) => sum + e.amount, 0),
+  };
+  
+  const totalExpenses = expensesByCategory.accommodation + expensesByCategory.food + expensesByCategory.other;
+  
+  const paidByFamily = families.map(family => ({
+    familyId: family.id,
+    familyName: getGroupLabel(family),
+    familyType: family.type,
+    total: expenses.filter(e => e.familyId === family.id).reduce((sum, e) => sum + e.amount, 0),
+  }));
+  
+  const getShare = (family, category, amount) => {
+    const fm = familyMetrics.find(f => f.id === family.id);
+    const setting = settings[category] || 'perPerson';
+    
+    if (setting === 'perFamily') {
+      return totalFamilies > 0 ? amount / totalFamilies : 0;
+    } else {
+      return totalWeightedUnits > 0 ? (fm.weightedUnits / totalWeightedUnits) * amount : 0;
+    }
+  };
+  
+  const shouldPayByFamily = familyMetrics.map(family => {
+    const accommodationShare = getShare(family, 'accommodation', expensesByCategory.accommodation);
+    const foodShare = getShare(family, 'food', expensesByCategory.food);
+    const otherShare = getShare(family, 'other', expensesByCategory.other);
+    
+    const familyPercent = totalFamilies > 0 ? (1 / totalFamilies) * 100 : 0;
+    const weightedPercent = totalWeightedUnits > 0 ? (family.weightedUnits / totalWeightedUnits) * 100 : 0;
+    
+    return {
+      familyId: family.id,
+      familyName: getGroupLabel(family),
+      familyType: family.type,
+      accommodation: accommodationShare,
+      food: foodShare,
+      other: otherShare,
+      total: accommodationShare + foodShare + otherShare,
+      bedNights: family.bedNights,
+      weightedUnits: family.weightedUnits,
+      coefficientSum: family.coefficientSum,
+      memberCount: family.memberCount,
+      nights: family.nights,
+      familyPercent,
+      weightedPercent,
+    };
+  });
+  
+  const balances = families.map(family => {
+    const paid = paidByFamily.find(p => p.familyId === family.id)?.total || 0;
+    const shouldPay = shouldPayByFamily.find(s => s.familyId === family.id)?.total || 0;
+    return {
+      familyId: family.id,
+      familyName: getGroupLabel(family),
+      familyType: family.type,
+      paid,
+      shouldPay,
+      balance: paid - shouldPay,
+    };
+  });
+  
+  const settlements = [];
+  const tempBalances = balances.map(b => ({ ...b }));
+  
+  const creditors = tempBalances.filter(b => b.balance > 0.01).sort((a, b) => b.balance - a.balance);
+  const debtors = tempBalances.filter(b => b.balance < -0.01).sort((a, b) => a.balance - b.balance);
+  
+  for (const debtor of debtors) {
+    for (const creditor of creditors) {
+      if (debtor.balance >= -0.01) break;
+      if (creditor.balance <= 0.01) continue;
+      
+      const amount = Math.min(creditor.balance, -debtor.balance);
+      if (amount > 0.01) {
+        settlements.push({
+          from: debtor.familyName,
+          to: creditor.familyName,
+          amount: Math.round(amount * 100) / 100,
+        });
+        debtor.balance += amount;
+        creditor.balance -= amount;
+      }
+    }
+  }
+  
+  return {
+    expensesByCategory,
+    totalExpenses,
+    paidByFamily,
+    shouldPayByFamily,
+    balances,
+    settlements,
+    totalBedNights,
+    totalWeightedUnits,
+    settings,
+  };
+};
+
+// Components
+const SettingsPanel = ({ settings, onUpdate }) => {
+  const categories = [
+    { key: 'accommodation', label: '🏠 Ubytovanie', icon: '🏠' },
+    { key: 'food', label: '🍽️ Strava', icon: '🍽️' },
+    { key: 'other', label: '📦 Iné', icon: '📦' },
+  ];
+  
+  return (
+    <div className="bg-white rounded-lg shadow p-4 mb-4">
+      <h3 className="font-semibold text-gray-800 mb-3">⚙️ Nastavenie spôsobu výpočtu</h3>
+      <div className="space-y-3">
+        {categories.map(cat => (
+          <div key={cat.key} className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <span className="text-sm font-medium w-32">{cat.label}:</span>
+            <div className="flex gap-2 flex-wrap">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name={`setting-${cat.key}`}
+                  checked={settings[cat.key] === 'perFamily'}
+                  onChange={() => onUpdate({ ...settings, [cat.key]: 'perFamily' })}
+                  className="text-blue-600"
+                />
+                <span className="text-sm">Rovným dielom (podľa rodín)</span>
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name={`setting-${cat.key}`}
+                  checked={settings[cat.key] === 'perPerson'}
+                  onChange={() => onUpdate({ ...settings, [cat.key]: 'perPerson' })}
+                  className="text-blue-600"
+                />
+                <span className="text-sm">Podľa osôb a koeficientov</span>
+              </label>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 p-2 bg-gray-50 rounded text-xs text-gray-600">
+        <strong>Rovným dielom:</strong> náklady sa rozdelia rovnako medzi všetkých účastníkov (napr. 50:50 pre 2 účastníkov)<br/>
+        <strong>Podľa osôb:</strong> náklady sa rozdelia podľa súčtu koeficientov × počet nocí
+      </div>
+    </div>
+  );
+};
+
+const COEFFICIENT_OPTIONS = [
+  { value: '0.1', label: '0.1×' },
+  { value: '0.2', label: '0.2×' },
+  { value: '0.3', label: '0.3×' },
+  { value: '0.4', label: '0.4×' },
+  { value: '0.5', label: '0.5×' },
+  { value: '0.6', label: '0.6×' },
+  { value: '0.7', label: '0.7×' },
+  { value: '0.8', label: '0.8×' },
+  { value: '0.9', label: '0.9×' },
+  { value: '1.0', label: '1.0×' },
+];
+
+const isStandardCoefficient = (coef) => {
+  return COEFFICIENT_OPTIONS.some(opt => parseFloat(opt.value) === coef);
+};
+
+const GroupEditor = ({ group, onUpdate, onRemove, canRemove }) => {
+  const [customCoefEditing, setCustomCoefEditing] = useState({});
+  
+  const isIndividual = group.type === 'individual';
+  
+  const addMember = () => {
+    if (isIndividual) return;
+    onUpdate({
+      ...group,
+      members: [...group.members, { id: generateId(), name: '', isChild: false, coefficient: 1.0 }],
+    });
+  };
+  
+  const removeMember = (memberId) => {
+    if (group.members.length <= 1) return;
+    setCustomCoefEditing(prev => {
+      const newState = { ...prev };
+      delete newState[memberId];
+      return newState;
+    });
+    onUpdate({
+      ...group,
+      members: group.members.filter(m => m.id !== memberId),
+    });
+  };
+  
+  const updateMember = (memberId, field, value) => {
+    onUpdate({
+      ...group,
+      members: group.members.map(m => {
+        if (m.id !== memberId) return m;
+        if (field === 'isChild') {
+          return { ...m, isChild: value };
+        }
+        if (field === 'coefficient') {
+          const numVal = value === '' || value === 0 ? 0 : (parseFloat(value) || 0);
+          return { ...m, coefficient: numVal };
+        }
+        return { ...m, [field]: value };
+      }),
+    });
+  };
+  
+  const handleCoefficientChange = (memberId, value) => {
+    if (value === 'custom') {
+      setCustomCoefEditing(prev => ({ ...prev, [memberId]: true }));
+    } else {
+      setCustomCoefEditing(prev => ({ ...prev, [memberId]: false }));
+      updateMember(memberId, 'coefficient', parseFloat(value));
+    }
+  };
+  
+  const getMemberCoefSelectValue = (member) => {
+    if (customCoefEditing[member.id]) return 'custom';
+    if (isStandardCoefficient(member.coefficient)) {
+      return member.coefficient.toFixed(1);
+    }
+    return 'custom';
+  };
+  
+  const getPlaceholder = () => {
+    if (isIndividual) return 'Meno jednotlivca';
+    return 'Názov skupiny (napr. Novákovci)';
+  };
+  
+  return (
+    <div className={`bg-white rounded-lg shadow p-4 mb-4 ${isIndividual ? 'border-l-4 border-blue-400' : ''}`}>
+      <div className="flex justify-between items-start mb-3">
+        <div className="flex items-center gap-2 flex-1 mr-2">
+          <span className="text-lg">
+            {isIndividual ? '👤' : '👨‍👩‍👧'}
+          </span>
+          <input
+            type="text"
+            value={group.name}
+            onChange={(e) => onUpdate({ ...group, name: e.target.value })}
+            placeholder={getPlaceholder()}
+            className="text-lg font-semibold border-b border-gray-300 focus:border-blue-500 outline-none flex-1 pb-1"
+          />
+        </div>
+        {canRemove && (
+          <button
+            onClick={onRemove}
+            className="text-red-500 hover:text-red-700 text-sm"
+          >
+            ✕ Odstrániť
+          </button>
+        )}
+      </div>
+      
+      <div className="mb-3">
+        <label className="block text-sm text-gray-600 mb-1">Počet nocí</label>
+        <input
+          type="number"
+          min="1"
+          value={group.nights === 0 ? '' : group.nights}
+          onChange={(e) => {
+            const val = e.target.value;
+            onUpdate({ ...group, nights: val === '' ? 0 : (parseInt(val) || 0) });
+          }}
+          onBlur={() => {
+            if (!group.nights || group.nights < 1) {
+              onUpdate({ ...group, nights: 1 });
+            }
+          }}
+          className="w-24 px-2 py-1 border rounded"
+        />
+      </div>
+      
+      {isIndividual ? (
+        <div className="bg-gray-50 p-3 rounded">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={group.members[0]?.isChild ? 'child' : 'adult'}
+              onChange={(e) => updateMember(group.members[0].id, 'isChild', e.target.value === 'child')}
+              className="px-2 py-1 border rounded text-sm bg-white"
+            >
+              <option value="adult">Dospelý</option>
+              <option value="child">Dieťa</option>
+            </select>
+            <div className="flex items-center gap-1">
+              <span className="text-sm text-gray-600">Koeficient:</span>
+              <select
+                value={getMemberCoefSelectValue(group.members[0])}
+                onChange={(e) => handleCoefficientChange(group.members[0].id, e.target.value)}
+                className="w-20 px-1 py-1 border rounded text-sm bg-white"
+              >
+                {COEFFICIENT_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+                <option value="custom">Vlastné</option>
+              </select>
+              {(customCoefEditing[group.members[0].id] || !isStandardCoefficient(group.members[0].coefficient)) && (
+                <input
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  value={group.members[0].coefficient === 0 ? '' : group.members[0].coefficient}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    updateMember(group.members[0].id, 'coefficient', val === '' ? 0 : val);
+                  }}
+                  onBlur={() => {
+                    if (group.members[0].coefficient === '' || group.members[0].coefficient < 0) {
+                      updateMember(group.members[0].id, 'coefficient', 1.0);
+                    }
+                    if (isStandardCoefficient(group.members[0].coefficient)) {
+                      setCustomCoefEditing(prev => ({ ...prev, [group.members[0].id]: false }));
+                    }
+                  }}
+                  className="w-16 px-1 py-1 border rounded text-sm text-center"
+                  placeholder="0.0"
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="text-sm text-gray-600 font-medium">Členovia skupiny:</div>
+          
+          <div className="hidden sm:flex items-center gap-2 px-2 text-xs text-gray-500 font-medium">
+            <span className="w-6"></span>
+            <span className="flex-1">Meno (nepovinné)</span>
+            <span className="w-24 text-center">Typ</span>
+            <span className="w-32 text-center">Koeficient</span>
+            <span className="w-6"></span>
+          </div>
+          
+          {group.members.map((member, idx) => {
+            const showCustomInput = customCoefEditing[member.id] || !isStandardCoefficient(member.coefficient);
+            
+            return (
+              <div key={member.id} className="flex flex-wrap sm:flex-nowrap items-center gap-2 bg-gray-50 p-2 rounded">
+                <span className="text-gray-400 w-6">{idx + 1}.</span>
+                <input
+                  type="text"
+                  value={member.name}
+                  onChange={(e) => updateMember(member.id, 'name', e.target.value)}
+                  placeholder="Meno"
+                  className="flex-1 min-w-20 px-2 py-1 border rounded text-sm"
+                />
+                <select
+                  value={member.isChild ? 'child' : 'adult'}
+                  onChange={(e) => updateMember(member.id, 'isChild', e.target.value === 'child')}
+                  className="w-24 px-2 py-1 border rounded text-sm bg-white"
+                >
+                  <option value="adult">Dospelý</option>
+                  <option value="child">Dieťa</option>
+                </select>
+                <div className="flex items-center gap-1">
+                  <select
+                    value={getMemberCoefSelectValue(member)}
+                    onChange={(e) => handleCoefficientChange(member.id, e.target.value)}
+                    className="w-20 px-1 py-1 border rounded text-sm bg-white"
+                  >
+                    {COEFFICIENT_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                    <option value="custom">Vlastné</option>
+                  </select>
+                  {showCustomInput && (
+                    <input
+                      type="number"
+                      min="0"
+                      max="2"
+                      step="0.1"
+                      value={member.coefficient === 0 ? '' : member.coefficient}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        updateMember(member.id, 'coefficient', val === '' ? 0 : val);
+                      }}
+                      onBlur={() => {
+                        if (member.coefficient === '' || member.coefficient < 0) {
+                          updateMember(member.id, 'coefficient', 1.0);
+                        }
+                        if (isStandardCoefficient(member.coefficient)) {
+                          setCustomCoefEditing(prev => ({ ...prev, [member.id]: false }));
+                        }
+                      }}
+                      className="w-16 px-1 py-1 border rounded text-sm text-center"
+                      placeholder="0.0"
+                    />
+                  )}
+                </div>
+                {group.members.length > 1 && (
+                  <button
+                    onClick={() => removeMember(member.id)}
+                    className="text-gray-400 hover:text-red-500 w-6 text-center"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          <button
+            onClick={addMember}
+            className="text-sm text-blue-600 hover:text-blue-800"
+          >
+            + Pridať člena
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const RECOMMENDED_COEFFICIENTS_INFO = [
+  { type: 'Dospelý', coefficient: '1.0', description: 'plná porcia' },
+  { type: 'Dieťa 8+ rokov', coefficient: '0.7', description: 'väčšia porcia' },
+  { type: 'Dieťa 5-7 rokov', coefficient: '0.5', description: 'polovičná porcia' },
+  { type: 'Dieťa do 5 rokov', coefficient: '0.3', description: 'malá porcia' },
+];
+
+const RecommendedCoefficients = () => (
+  <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mt-4">
+    <h4 className="font-semibold text-amber-800 mb-2">💡 Odporúčané koeficienty pre stravu</h4>
+    <div className="space-y-1 text-sm">
+      {RECOMMENDED_COEFFICIENTS_INFO.map(c => (
+        <div key={c.type} className="flex justify-between items-center">
+          <span className="text-amber-700">{c.type}:</span>
+          <span className="font-medium text-amber-900">{c.coefficient}× <span className="font-normal text-amber-600">({c.description})</span></span>
+        </div>
+      ))}
+    </div>
+    <p className="text-xs text-amber-600 mt-2">
+      Tieto hodnoty sú len odporúčané. Môžete si nastaviť vlastné koeficienty podľa skutočnej spotreby.
+    </p>
+  </div>
+);
+
+const ExpenseEditor = ({ expense, families, onUpdate, onRemove }) => {
+  const categories = [
+    { value: 'accommodation', label: '🏠 Ubytovanie' },
+    { value: 'food', label: '🍽️ Strava' },
+    { value: 'other', label: '📦 Iné' },
+  ];
+  
+  const getGroupLabel = (group) => {
+    if (group.name) return group.name;
+    return group.type === 'individual' ? 'Jednotlivec' : 'Skupina';
+  };
+  
+  return (
+    <div className="flex flex-wrap items-center gap-2 bg-gray-50 p-3 rounded mb-2">
+      <select
+        value={expense.familyId}
+        onChange={(e) => onUpdate({ ...expense, familyId: e.target.value })}
+        className="px-2 py-1 border rounded text-sm"
+      >
+        <option value="">Kto zaplatil?</option>
+        {families.map(f => (
+          <option key={f.id} value={f.id}>
+            {f.type === 'individual' ? '👤 ' : '👨‍👩‍👧 '}
+            {getGroupLabel(f)}
+          </option>
+        ))}
+      </select>
+      
+      <select
+        value={expense.category}
+        onChange={(e) => onUpdate({ ...expense, category: e.target.value })}
+        className="px-2 py-1 border rounded text-sm"
+      >
+        {categories.map(c => (
+          <option key={c.value} value={c.value}>{c.label}</option>
+        ))}
+      </select>
+      
+      <input
+        type="text"
+        value={expense.description}
+        onChange={(e) => onUpdate({ ...expense, description: e.target.value })}
+        placeholder="Popis (napr. Lidl nákup)"
+        className="flex-1 min-w-32 px-2 py-1 border rounded text-sm"
+      />
+      
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          min="0"
+          step="0.01"
+          value={expense.amount === 0 ? '' : expense.amount}
+          onChange={(e) => {
+            const val = e.target.value;
+            onUpdate({ ...expense, amount: val === '' ? 0 : (parseFloat(val) || 0) });
+          }}
+          placeholder="0.00"
+          className="w-24 px-2 py-1 border rounded text-sm text-right"
+        />
+        <span className="text-sm text-gray-500">€</span>
+      </div>
+      
+      <button
+        onClick={onRemove}
+        className="text-gray-400 hover:text-red-500"
+      >
+        ✕
+      </button>
+    </div>
+  );
+};
+
+const NotesEditor = ({ notes, onChange, readOnly = false }) => {
+  const maxLength = 600;
+  
+  if (readOnly) {
+    if (!notes) return null;
+    return (
+      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mt-4">
+        <h4 className="font-semibold text-yellow-800 mb-2">📝 Poznámka od organizátora</h4>
+        <p className="text-sm text-yellow-900 whitespace-pre-wrap">{notes}</p>
+      </div>
+    );
+  }
+  
+  return (
+    <div className="bg-white rounded-lg shadow p-4 mb-4">
+      <h3 className="font-semibold text-gray-800 mb-2">📝 Poznámka pre účastníkov</h3>
+      <textarea
+        value={notes}
+        onChange={(e) => onChange(e.target.value.slice(0, maxLength))}
+        placeholder="Pridajte poznámku, ktorú uvidia ostatní účastníci (napr. číslo účtu pre prevod, termín splatnosti...)"
+        className="w-full h-24 px-3 py-2 border rounded text-sm resize-none"
+        maxLength={maxLength}
+      />
+      <div className="text-xs text-gray-500 text-right mt-1">
+        {notes.length}/{maxLength} znakov
+      </div>
+    </div>
+  );
+};
+
+const ResultsPanel = ({ calculation, isReadOnly = false }) => {
+  const results = calculateShares(calculation);
+  const { settings } = results;
+  const [expandedGroups, setExpandedGroups] = useState({});
+  
+  const toggleExpand = (familyId) => {
+    setExpandedGroups(prev => ({
+      ...prev,
+      [familyId]: !prev[familyId]
+    }));
+  };
+  
+  const getMethodLabel = (method) => {
+    return method === 'perFamily' ? 'rovným dielom' : 'podľa osôb';
+  };
+  
+  const getIcon = (type) => type === 'individual' ? '👤' : '👨‍👩‍👧';
+  
+  const getFamilyMembers = (familyId) => {
+    const family = calculation.families.find(f => f.id === familyId);
+    return family ? family.members : [];
+  };
+  
+  if (results.totalExpenses === 0) {
+    return (
+      <div className="bg-yellow-50 rounded-lg p-4 text-center text-yellow-700">
+        Pridajte náklady pre zobrazenie výsledkov
+      </div>
+    );
+  }
+  
+  return (
+    <div className="space-y-4">
+      <div className="bg-blue-50 rounded-lg p-4">
+        <h3 className="font-semibold text-blue-900 mb-2">📊 Celkové náklady</h3>
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <div className="flex items-center gap-1">
+            <span>Ubytovanie</span>
+            <span className="text-xs text-blue-600">({getMethodLabel(settings.accommodation)})</span>:
+          </div>
+          <div className="text-right font-medium">{results.expensesByCategory.accommodation.toFixed(2)} €</div>
+          
+          <div className="flex items-center gap-1">
+            <span>Strava</span>
+            <span className="text-xs text-blue-600">({getMethodLabel(settings.food)})</span>:
+          </div>
+          <div className="text-right font-medium">{results.expensesByCategory.food.toFixed(2)} €</div>
+          
+          <div className="flex items-center gap-1">
+            <span>Iné</span>
+            <span className="text-xs text-blue-600">({getMethodLabel(settings.other)})</span>:
+          </div>
+          <div className="text-right font-medium">{results.expensesByCategory.other.toFixed(2)} €</div>
+          
+          <div className="font-bold border-t pt-1">Spolu:</div>
+          <div className="text-right font-bold border-t pt-1">{results.totalExpenses.toFixed(2)} €</div>
+        </div>
+      </div>
+      
+      <div className="bg-gray-50 rounded-lg p-4">
+        <h3 className="font-semibold text-gray-900 mb-2">👥 Podiely účastníkov</h3>
+        <div className="space-y-3">
+          {results.shouldPayByFamily.map((family, idx) => {
+            const members = getFamilyMembers(family.familyId);
+            const isExpanded = expandedGroups[family.familyId];
+            
+            return (
+              <div key={family.familyId} className="bg-white p-3 rounded shadow-sm">
+                <div className="font-medium mb-1">
+                  {getIcon(family.familyType)} {family.familyName}
+                </div>
+                <div className="text-xs text-gray-500 mb-2">
+                  {family.memberCount} {family.memberCount === 1 ? 'osoba' : family.memberCount < 5 ? 'osoby' : 'osôb'} × {family.nights} {family.nights === 1 ? 'noc' : family.nights < 5 ? 'noci' : 'nocí'} • 
+                  Koeficient: {family.coefficientSum.toFixed(1)} • 
+                  Váha: {family.weightedUnits.toFixed(1)} ({family.weightedPercent.toFixed(1)}%)
+                </div>
+                
+                <button
+                  onClick={() => toggleExpand(family.familyId)}
+                  className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 mb-2"
+                >
+                  <span className={`transform transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▶</span>
+                  <span>{isExpanded ? 'Skryť' : 'Zobraziť'} členov ({members.length})</span>
+                </button>
+                
+                {isExpanded && (
+                  <div className="mb-3 ml-2 pl-2 border-l-2 border-gray-200">
+                    <div className="space-y-1">
+                      {members.map((member, mIdx) => (
+                        <div key={member.id} className="flex justify-between items-center text-xs py-1">
+                          <span className="text-gray-700">
+                            {member.name || `${family.familyType === 'individual' ? 'Jednotlivec' : `Člen ${mIdx + 1}`}`}
+                            <span className="text-gray-400 ml-1">
+                              ({member.isChild ? 'dieťa' : 'dospelý'})
+                            </span>
+                          </span>
+                          <span className="font-medium text-gray-900 bg-gray-100 px-2 py-0.5 rounded">
+                            {member.coefficient.toFixed(1)}×
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex justify-between items-center text-xs pt-2 mt-2 border-t border-gray-200">
+                      <span className="font-medium text-gray-600">Súčet koeficientov:</span>
+                      <span className="font-bold text-gray-900">{family.coefficientSum.toFixed(1)}×</span>
+                    </div>
+                  </div>
+                )}
+                
+                <div className="grid grid-cols-2 gap-1 text-sm">
+                  <div className="text-gray-600">Ubytovanie:</div>
+                  <div className="text-right">{family.accommodation.toFixed(2)} €</div>
+                  <div className="text-gray-600">Strava:</div>
+                  <div className="text-right">{family.food.toFixed(2)} €</div>
+                  <div className="text-gray-600">Iné:</div>
+                  <div className="text-right">{family.other.toFixed(2)} €</div>
+                  <div className="font-semibold border-t pt-1">Má zaplatiť:</div>
+                  <div className="text-right font-semibold border-t pt-1">{family.total.toFixed(2)} €</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      
+      <div className="bg-gray-50 rounded-lg p-4">
+        <h3 className="font-semibold text-gray-900 mb-2">💰 Bilancia</h3>
+        <div className="space-y-2">
+          {results.balances.map((balance, idx) => (
+            <div key={balance.familyId} className="flex justify-between items-center bg-white p-2 rounded">
+              <span>{getIcon(balance.familyType)} {balance.familyName}</span>
+              <div className="text-right text-sm">
+                <div className="text-gray-500">Zaplatil: {balance.paid.toFixed(2)} €</div>
+                <div className={`font-medium ${balance.balance > 0.01 ? 'text-green-600' : balance.balance < -0.01 ? 'text-red-600' : 'text-gray-600'}`}>
+                  {balance.balance > 0.01 ? `+${balance.balance.toFixed(2)} €` : balance.balance < -0.01 ? `${balance.balance.toFixed(2)} €` : 'Vyrovnané'}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      
+      {results.settlements.length > 0 && (
+        <div className="bg-green-50 rounded-lg p-4">
+          <h3 className="font-semibold text-green-900 mb-2">✅ Vyrovnanie</h3>
+          <div className="space-y-2">
+            {results.settlements.map((settlement, idx) => (
+              <div key={idx} className="flex items-center justify-between bg-white p-3 rounded shadow-sm">
+                <span className="font-medium">{settlement.from}</span>
+                <span className="text-gray-400 mx-2">→</span>
+                <span className="font-medium">{settlement.to}</span>
+                <span className="font-bold text-green-700 ml-4">{settlement.amount.toFixed(2)} €</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      
+      {results.settlements.length === 0 && results.totalExpenses > 0 && (
+        <div className="bg-green-50 rounded-lg p-4 text-center text-green-700">
+          ✅ Všetko je vyrovnané!
+        </div>
+      )}
+      
+      {isReadOnly && <NotesEditor notes={calculation.notes} readOnly={true} />}
+    </div>
+  );
+};
+
+const CalculationView = ({ calculation, onUpdate, onBack, onSave, isReadOnly = false }) => {
+  const [activeTab, setActiveTab] = useState(isReadOnly ? 'results' : 'families');
+  const [saving, setSaving] = useState(false);
+  const [shareUrl, setShareUrl] = useState('');
+  const [copied, setCopied] = useState(false);
+  
+  const MAX_GROUPS = 15;
+  
+  const updateGroup = (updatedGroup) => {
+    onUpdate({
+      ...calculation,
+      families: calculation.families.map(f => f.id === updatedGroup.id ? updatedGroup : f),
+    });
+  };
+  
+  const removeGroup = (groupId) => {
+    if (calculation.families.length <= 2) return;
+    onUpdate({
+      ...calculation,
+      families: calculation.families.filter(f => f.id !== groupId),
+      expenses: calculation.expenses.filter(e => e.familyId !== groupId),
+    });
+  };
+  
+  const addGroup = (type = 'group') => {
+    if (calculation.families.length >= MAX_GROUPS) return;
+    onUpdate({
+      ...calculation,
+      families: [...calculation.families, defaultGroup(type)],
+    });
+  };
+  
+  const updateExpense = (updatedExpense) => {
+    onUpdate({
+      ...calculation,
+      expenses: calculation.expenses.map(e => e.id === updatedExpense.id ? updatedExpense : e),
+    });
+  };
+  
+  const removeExpense = (expenseId) => {
+    onUpdate({
+      ...calculation,
+      expenses: calculation.expenses.filter(e => e.id !== expenseId),
+    });
+  };
+  
+  const addExpense = () => {
+    const newExpense = defaultExpense();
+    if (calculation.families.length > 0) {
+      newExpense.familyId = calculation.families[0].id;
+    }
+    onUpdate({
+      ...calculation,
+      expenses: [...calculation.expenses, newExpense],
+    });
+  };
+  
+  const updateSettings = (newSettings) => {
+    onUpdate({
+      ...calculation,
+      settings: newSettings,
+    });
+  };
+  
+  const updateNotes = (notes) => {
+    onUpdate({
+      ...calculation,
+      notes,
+    });
+  };
+  
+  const handleSave = async () => {
+    setSaving(true);
+    
+    try {
+      await onSave();
+    } catch (e) {
+      console.log('Storage save failed:', e);
+    }
+    
+    const encoded = encodeCalcData(calculation);
+    if (encoded) {
+      const url = `${window.location.origin}${window.location.pathname}?data=${encoded}`;
+      setShareUrl(url);
+    }
+    
+    setSaving(false);
+  };
+  
+  const copyShareUrl = () => {
+    navigator.clipboard.writeText(shareUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  
+  const settings = calculation.settings || defaultSettings();
+  
+  const groupCount = calculation.families.filter(f => f.type !== 'individual').length;
+  const individualCount = calculation.families.filter(f => f.type === 'individual').length;
+  
+  return (
+    <div className="min-h-screen bg-gray-100">
+      <div className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-3">
+          <div className="flex items-center gap-3 mb-2">
+            <button onClick={onBack} className="text-gray-500 hover:text-gray-700">
+              ← Späť
+            </button>
+            {isReadOnly ? (
+              <h1 className="text-xl font-bold flex-1">{calculation.name}</h1>
+            ) : (
+              <input
+                type="text"
+                value={calculation.name}
+                onChange={(e) => onUpdate({ ...calculation, name: e.target.value })}
+                className="text-xl font-bold flex-1 border-b border-transparent hover:border-gray-300 focus:border-blue-500 outline-none"
+                placeholder="Názov dovolenky"
+              />
+            )}
+          </div>
+          
+          {!isReadOnly && (
+            <div className="flex gap-2">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-4 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm"
+              >
+                {saving ? 'Ukladám...' : '💾 Uložiť a zdieľať'}
+              </button>
+              
+              {shareUrl && (
+                <button
+                  onClick={copyShareUrl}
+                  className={`px-4 py-1 rounded text-sm ${
+                    copied 
+                      ? 'bg-green-600 text-white' 
+                      : 'bg-green-100 text-green-700 hover:bg-green-200'
+                  }`}
+                >
+                  {copied ? '✓ Skopírované!' : '📋 Kopírovať link'}
+                </button>
+              )}
+            </div>
+          )}
+          
+          {shareUrl && !isReadOnly && (
+            <div className="mt-2 p-2 bg-green-50 rounded text-xs text-green-700">
+              <div className="font-medium mb-1">✅ Link vytvorený - funguje pre kohokoľvek!</div>
+              <div className="break-all bg-white p-1 rounded border border-green-200">{shareUrl}</div>
+            </div>
+          )}
+          
+          {isReadOnly && (
+            <div className="mt-2 p-2 bg-blue-50 rounded text-xs text-blue-700">
+              📖 Zdieľaný prepočet (len na čítanie)
+            </div>
+          )}
+        </div>
+        
+        <div className="max-w-2xl mx-auto px-4 flex border-t">
+          {(isReadOnly ? ['results'] : ['families', 'expenses', 'results']).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 py-2 text-center text-sm font-medium border-b-2 ${
+                activeTab === tab 
+                  ? 'border-blue-600 text-blue-600' 
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {tab === 'families' && '👥 Účastníci'}
+              {tab === 'expenses' && '💳 Náklady'}
+              {tab === 'results' && '📊 Výsledky'}
+            </button>
+          ))}
+        </div>
+      </div>
+      
+      <div className="max-w-2xl mx-auto px-4 py-4">
+        {activeTab === 'families' && !isReadOnly && (
+          <div>
+            <SettingsPanel 
+              settings={settings} 
+              onUpdate={updateSettings} 
+            />
+            
+            <div className="mb-4 p-3 bg-gray-100 rounded-lg text-sm text-gray-600">
+              <span className="font-medium">{calculation.families.length}</span> účastníkov 
+              ({groupCount} {groupCount === 1 ? 'skupina' : groupCount < 5 ? 'skupiny' : 'skupín'}, 
+              {' '}{individualCount} {individualCount === 1 ? 'jednotlivec' : individualCount < 5 ? 'jednotlivci' : 'jednotlivcov'})
+            </div>
+            
+            {calculation.families.map((group, idx) => (
+              <GroupEditor
+                key={group.id}
+                group={group}
+                onUpdate={updateGroup}
+                onRemove={() => removeGroup(group.id)}
+                canRemove={calculation.families.length > 2}
+              />
+            ))}
+            
+            {calculation.families.length < MAX_GROUPS && (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => addGroup('group')}
+                  className="flex-1 py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-600"
+                >
+                  👨‍👩‍👧 + Pridať skupinu
+                </button>
+                <button
+                  onClick={() => addGroup('individual')}
+                  className="flex-1 py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-600"
+                >
+                  👤 + Pridať jednotlivca
+                </button>
+              </div>
+            )}
+            
+            {calculation.families.length >= MAX_GROUPS && (
+              <div className="text-center text-sm text-gray-500 py-2">
+                Dosiahnutý maximálny počet účastníkov ({MAX_GROUPS})
+              </div>
+            )}
+            
+            <RecommendedCoefficients />
+          </div>
+        )}
+        
+        {activeTab === 'expenses' && !isReadOnly && (
+          <div>
+            <NotesEditor 
+              notes={calculation.notes || ''} 
+              onChange={updateNotes}
+            />
+            
+            {calculation.expenses.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                Zatiaľ žiadne náklady. Pridajte prvý náklad.
+              </div>
+            ) : (
+              calculation.expenses.map(expense => (
+                <ExpenseEditor
+                  key={expense.id}
+                  expense={expense}
+                  families={calculation.families}
+                  onUpdate={updateExpense}
+                  onRemove={() => removeExpense(expense.id)}
+                />
+              ))
+            )}
+            
+            <button
+              onClick={addExpense}
+              className="w-full py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-600 mt-2"
+            >
+              + Pridať náklad
+            </button>
+          </div>
+        )}
+        
+        {activeTab === 'results' && (
+          <ResultsPanel calculation={calculation} isReadOnly={isReadOnly} />
+        )}
+      </div>
+    </div>
+  );
+};
+
+const HomeView = ({ calculations, onSelect, onCreate, onDelete, loading }) => {
+  return (
+    <div className="min-h-screen bg-gray-100">
+      <div className="bg-gradient-to-br from-blue-600 to-blue-800 text-white py-8 px-4">
+        <div className="max-w-2xl mx-auto">
+          <h1 className="text-2xl font-bold mb-2">🏔️ Kalkulačka nákladov z dovolenky</h1>
+          <p className="text-blue-100">Spravodlivé rozdelenie nákladov medzi skupiny a jednotlivcov</p>
+        </div>
+      </div>
+      
+      <div className="max-w-2xl mx-auto px-4 py-6">
+        <button
+          onClick={onCreate}
+          className="w-full py-4 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 shadow-lg mb-6"
+        >
+          + Nový prepočet
+        </button>
+        
+        {loading ? (
+          <div className="text-center py-8 text-gray-500">Načítavam...</div>
+        ) : calculations.length > 0 ? (
+          <div>
+            <h2 className="text-lg font-semibold text-gray-700 mb-3">Uložené prepočty</h2>
+            <div className="space-y-2">
+              {calculations.map(calc => (
+                <div
+                  key={calc.id}
+                  className="bg-white rounded-lg shadow p-4 flex justify-between items-center"
+                >
+                  <div 
+                    className="flex-1 cursor-pointer"
+                    onClick={() => onSelect(calc)}
+                  >
+                    <div className="font-medium">{calc.name}</div>
+                    <div className="text-sm text-gray-500">
+                      {calc.families?.length || 0} účastníkov • {calc.expenses?.length || 0} nákladov
+                    </div>
+                    <div className="text-xs text-gray-400">
+                      {new Date(calc.createdAt).toLocaleDateString('sk-SK')}
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm('Naozaj chcete vymazať tento prepočet?')) {
+                        onDelete(calc.id);
+                      }
+                    }}
+                    className="text-gray-400 hover:text-red-500 ml-4"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-gray-500">
+            Zatiaľ žiadne uložené prepočty
+          </div>
+        )}
+        
+        <div className="mt-8 p-4 bg-white rounded-lg shadow">
+          <h3 className="font-semibold mb-2">ℹ️ Ako to funguje?</h3>
+          <ul className="text-sm text-gray-600 space-y-1">
+            <li>1. Vytvorte nový prepočet a pridajte účastníkov</li>
+            <li>2. Nastavte spôsob výpočtu pre každú kategóriu</li>
+            <li>3. Pridajte skupiny (rodiny) alebo jednotlivcov</li>
+            <li>4. Pridajte všetky náklady (ubytovanie, strava, iné)</li>
+            <li>5. Pozrite si výsledky a kto komu koľko dlhuje</li>
+            <li>6. Uložte a zdieľajte s ostatnými účastníkmi</li>
+          </ul>
+        </div>
+        
+        <div className="mt-4 p-4 bg-green-50 rounded-lg border border-green-200">
+          <h3 className="font-semibold text-green-800 mb-2">🔗 Zdieľanie</h3>
+          <p className="text-sm text-green-700">
+            Po vytvorení prepočtu môžete vygenerovať link, ktorý funguje pre kohokoľvek - 
+            príjemcovia nepotrebujú žiadne konto ani prihlásenie.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main App
+function VacationExpensesApp() {
+  const [view, setView] = useState('home');
+  const [calculations, setCalculations] = useState([]);
+  const [currentCalc, setCurrentCalc] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [isReadOnly, setIsReadOnly] = useState(false);
+  
+  useEffect(() => {
+    const init = () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      
+      // Check for shared data in URL
+      const encodedData = urlParams.get('data');
+      if (encodedData) {
+        const decoded = decodeCalcData(encodedData);
+        if (decoded) {
+          const loaded = {
+            ...decoded,
+            settings: decoded.settings || defaultSettings(),
+            notes: decoded.notes || '',
+            families: (decoded.families || []).map(f => ({
+              ...f,
+              type: f.type || 'group',
+              members: (f.members || []).map(m => ({
+                ...m,
+                coefficient: m.coefficient !== undefined ? m.coefficient : 1.0,
+                isChild: m.isChild !== undefined ? m.isChild : false,
+              })),
+            })),
+          };
+          setCurrentCalc(loaded);
+          setIsReadOnly(true);
+          setView('calculation');
+          setLoading(false);
+          return;
+        }
+      }
+      
+      // Load from localStorage
+      const calcs = loadFromLocalStorage();
+      setCalculations(calcs);
+      setLoading(false);
+    };
+    
+    init();
+  }, []);
+  
+  const handleCreate = () => {
+    setCurrentCalc(defaultCalculation());
+    setIsReadOnly(false);
+    setView('calculation');
+  };
+  
+  const handleSelect = (calc) => {
+    const updatedCalc = {
+      ...calc,
+      settings: calc.settings || defaultSettings(),
+      notes: calc.notes || '',
+      families: calc.families.map(f => ({
+        ...f,
+        type: f.type || 'group',
+        members: f.members.map(m => ({
+          ...m,
+          coefficient: m.coefficient !== undefined ? m.coefficient : 1.0,
+          isChild: m.isChild !== undefined ? m.isChild : false,
+        })),
+      })),
+    };
+    setCurrentCalc(updatedCalc);
+    setIsReadOnly(false);
+    setView('calculation');
+  };
+  
+  const handleDelete = (id) => {
+    const updated = calculations.filter(c => c.id !== id);
+    setCalculations(updated);
+    saveToLocalStorage(updated);
+  };
+  
+  const handleSave = () => {
+    const existing = calculations.find(c => c.id === currentCalc.id);
+    let updated;
+    if (existing) {
+      updated = calculations.map(c => c.id === currentCalc.id ? currentCalc : c);
+    } else {
+      updated = [...calculations, currentCalc];
+    }
+    setCalculations(updated);
+    saveToLocalStorage(updated);
+    return true;
+  };
+  
+  const handleBack = () => {
+    setView('home');
+    setCurrentCalc(null);
+    setIsReadOnly(false);
+    window.history.replaceState({}, '', window.location.pathname);
+  };
+  
+  if (view === 'calculation' && currentCalc) {
+    return (
+      <CalculationView
+        calculation={currentCalc}
+        onUpdate={setCurrentCalc}
+        onBack={handleBack}
+        onSave={handleSave}
+        isReadOnly={isReadOnly}
+      />
+    );
+  }
+  
+  return (
+    <HomeView
+      calculations={calculations}
+      onSelect={handleSelect}
+      onCreate={handleCreate}
+      onDelete={handleDelete}
+      loading={loading}
+    />
+  );
+}
+
+ReactDOM.render(<VacationExpensesApp />, document.getElementById('root'));
+    </script>
+</body>
+</html>
