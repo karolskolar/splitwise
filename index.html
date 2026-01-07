@@ -15,6 +15,11 @@
     <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 
+// API Configuration
+const API_URL = window.location.hostname === 'localhost'
+  ? 'http://localhost:3001'  // Local development
+  : 'https://splitwise-api.skolar.sk';  // Production
+
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
 // URL encoding/decoding for shareable links
@@ -37,6 +42,36 @@ const decodeCalcData = (encoded) => {
     return JSON.parse(json);
   } catch (e) {
     console.error('Failed to decode:', e);
+    return null;
+  }
+};
+
+// API functions for short URLs
+const saveToApi = async (calculation) => {
+  if (!API_URL) return null;
+  try {
+    const response = await fetch(`${API_URL}/api/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(calculation)
+    });
+    if (!response.ok) throw new Error('API error');
+    const { id } = await response.json();
+    return id;
+  } catch (e) {
+    console.error('Failed to save to API:', e);
+    return null;
+  }
+};
+
+const loadFromApi = async (id) => {
+  if (!API_URL) return null;
+  try {
+    const response = await fetch(`${API_URL}/api/load/${id}`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (e) {
+    console.error('Failed to load from API:', e);
     return null;
   }
 };
@@ -901,19 +936,28 @@ const CalculationView = ({ calculation, onUpdate, onBack, onSave, isReadOnly = f
   
   const handleSave = async () => {
     setSaving(true);
-    
+
     try {
       await onSave();
     } catch (e) {
       console.log('Storage save failed:', e);
     }
-    
-    const encoded = encodeCalcData(calculation);
-    if (encoded) {
-      const url = `${window.location.origin}${window.location.pathname}?data=${encoded}`;
+
+    // Try to use backend API for short URLs
+    const shortId = await saveToApi(calculation);
+    if (shortId) {
+      // Use short URL format: /s/abc123
+      const url = `${window.location.origin}${window.location.pathname}?s=${shortId}`;
       setShareUrl(url);
+    } else {
+      // Fallback to base64 encoding if API unavailable
+      const encoded = encodeCalcData(calculation);
+      if (encoded) {
+        const url = `${window.location.origin}${window.location.pathname}?data=${encoded}`;
+        setShareUrl(url);
+      }
     }
-    
+
     setSaving(false);
   };
   
@@ -1193,10 +1237,37 @@ function VacationExpensesApp() {
   const [isReadOnly, setIsReadOnly] = useState(false);
   
   useEffect(() => {
-    const init = () => {
+    const init = async () => {
       const urlParams = new URLSearchParams(window.location.search);
-      
-      // Check for shared data in URL
+
+      // Check for short URL parameter (?s=abc123)
+      const shortId = urlParams.get('s');
+      if (shortId) {
+        const data = await loadFromApi(shortId);
+        if (data) {
+          const loaded = {
+            ...data,
+            settings: data.settings || defaultSettings(),
+            notes: data.notes || '',
+            families: (data.families || []).map(f => ({
+              ...f,
+              type: f.type || 'group',
+              members: (f.members || []).map(m => ({
+                ...m,
+                coefficient: m.coefficient !== undefined ? m.coefficient : 1.0,
+                isChild: m.isChild !== undefined ? m.isChild : false,
+              })),
+            })),
+          };
+          setCurrentCalc(loaded);
+          setIsReadOnly(true);
+          setView('calculation');
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Check for legacy shared data in URL (?data=base64...)
       const encodedData = urlParams.get('data');
       if (encodedData) {
         const decoded = decodeCalcData(encodedData);
@@ -1222,13 +1293,13 @@ function VacationExpensesApp() {
           return;
         }
       }
-      
+
       // Load from localStorage
       const calcs = loadFromLocalStorage();
       setCalculations(calcs);
       setLoading(false);
     };
-    
+
     init();
   }, []);
   

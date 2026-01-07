@@ -1,0 +1,66 @@
+{
+  "hU1jrN5K": {
+    "data": {
+      "test": "data",
+      "name": "Test Calculation"
+    },
+    "createdAt": "2026-01-07T15:56:37.216Z",
+    "accessedAt": "2026-01-07T15:56:41.733Z",
+    "accessCount": 1
+  },
+  "7Gom4UpR": {
+    "data": {
+      "id": "v4oalbfo1",
+      "name": "Nová dovolenka",
+      "createdAt": "2026-01-07T15:57:53.020Z",
+      "families": [
+        {
+          "id": "3su8t9z40",
+          "name": "sdfsdf",
+          "type": "group",
+          "members": [
+            {
+              "id": "vkd4emlwm",
+              "name": "sdfdsf",
+              "isChild": false,
+              "coefficient": 1
+            }
+          ],
+          "nights": 1
+        },
+        {
+          "id": "o2u43wo2e",
+          "name": "",
+          "type": "group",
+          "members": [
+            {
+              "id": "wps855wnw",
+              "name": "sdfsdf",
+              "isChild": false,
+              "coefficient": 1
+            }
+          ],
+          "nights": 1
+        }
+      ],
+      "expenses": [
+        {
+          "id": "rrvvwlji3",
+          "familyId": "3su8t9z40",
+          "category": "food",
+          "description": "fddsfdf",
+          "amount": 43
+        }
+      ],
+      "settings": {
+        "accommodation": "perPerson",
+        "food": "perPerson",
+        "other": "perFamily"
+      },
+      "notes": ""
+    },
+    "createdAt": "2026-01-07T15:58:12.122Z",
+    "accessedAt": "2026-01-07T15:58:20.778Z",
+    "accessCount": 1
+  }
+}

@@ -1,0 +1,13 @@
+# Caddyfile for automatic HTTPS
+# Rename this to Caddyfile and update your domain
+
+api.yourdomain.com {
+    reverse_proxy api:3001
+
+    # Optional: Add rate limiting headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}
