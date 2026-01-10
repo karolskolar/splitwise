@@ -9,8 +9,9 @@ services:
       - "3001:3001"
     environment:
       - PORT=3001
-      - DB_PATH=/app/data/calculations.db
       - CORS_ORIGIN=*
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - JWT_SECRET=${JWT_SECRET}
       # For production, set specific origin:
       # - CORS_ORIGIN=https://yourusername.github.io
     volumes:

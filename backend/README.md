@@ -1,6 +1,6 @@
 # Splitwise API
 
-Backend API for URL shortening in the Splitwise app.
+Backend API for Splitwise app with Google OAuth authentication.
 
 ## Quick Start (Local Development)
 
@@ -11,6 +11,34 @@ npm start
 ```
 
 The API will run at `http://localhost:3001`
+
+## Google OAuth Setup (Required)
+
+Before deploying, you need to set up Google OAuth credentials:
+
+1. **Go to Google Cloud Console:** https://console.cloud.google.com/
+
+2. **Create a new project** (or select existing):
+   - Click the project dropdown → "New Project"
+   - Name: "Splitwise"
+
+3. **Enable Google Identity API:**
+   - Go to "APIs & Services" → "Library"
+   - Search for "Google Identity" and enable it
+
+4. **Create OAuth 2.0 credentials:**
+   - Go to "APIs & Services" → "Credentials"
+   - Click "Create Credentials" → "OAuth client ID"
+   - Application type: "Web application"
+   - Name: "Splitwise Web Client"
+
+5. **Configure authorized JavaScript origins:**
+   - `http://localhost:8080` (local development)
+   - `https://yourusername.github.io` (GitHub Pages - your frontend URL)
+
+6. **Save the Client ID** - you'll need it for:
+   - Frontend: `GOOGLE_CLIENT_ID` constant in `index.html`
+   - Backend: `GOOGLE_CLIENT_ID` environment variable
 
 ## Deployment on Proxmox
 
@@ -70,9 +98,16 @@ The API will run at `http://localhost:3001`
    Restart=on-failure
    Environment=PORT=3001
    Environment=NODE_ENV=production
+   Environment=GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+   Environment=JWT_SECRET=your-random-secret-here
 
    [Install]
    WantedBy=multi-user.target
+   ```
+
+   **Generate a secure JWT secret:**
+   ```bash
+   openssl rand -base64 32
    ```
 
 4. **Start service:**
@@ -123,12 +158,17 @@ const API_URL = window.location.hostname === 'localhost'
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/save` | Save calculation, returns `{ id }` |
-| GET | `/api/load/:id` | Load calculation by ID |
-| GET | `/api/stats` | Get usage statistics |
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/health` | No | Health check |
+| POST | `/api/auth/google` | No | Verify Google token, return JWT |
+| GET | `/api/auth/me` | Yes | Get current user info |
+| GET | `/api/calculations` | Yes | Get user's calculations |
+| POST | `/api/save` | Optional | Save calculation (links to user if logged in) |
+| GET | `/api/load/:id` | No | Load calculation by ID (public for sharing) |
+| POST | `/api/calculations/:id` | Yes | Update calculation (owner only) |
+| DELETE | `/api/calculations/:id` | Yes | Delete calculation (owner only) |
+| GET | `/api/stats` | No | Get usage statistics |
 
 ## Environment Variables
 
@@ -137,11 +177,14 @@ const API_URL = window.location.hostname === 'localhost'
 | `PORT` | 3001 | Server port |
 | `DATA_DIR` | `./data` | Directory for data storage |
 | `CORS_ORIGIN` | `*` | Allowed CORS origin |
+| `GOOGLE_CLIENT_ID` | (required) | Google OAuth Client ID |
+| `JWT_SECRET` | (change in prod) | Secret for signing JWT tokens |
 
 ## Data Storage
 
 - Calculations are stored in `./data/calculations.json`
-- Simple JSON file - easy to backup, inspect, and migrate
+- Users are stored in `./data/users.json`
+- Simple JSON files - easy to backup, inspect, and migrate
 - No database required
 
 ## Backup
@@ -149,9 +192,10 @@ const API_URL = window.location.hostname === 'localhost'
 To backup the data:
 ```bash
 cp data/calculations.json data/calculations.json.backup
+cp data/users.json data/users.json.backup
 ```
 
 Or with Docker:
 ```bash
-docker cp splitwise-api:/app/data/calculations.json ./backup.json
+docker cp splitwise-api:/app/data ./backup-data/
 ```
