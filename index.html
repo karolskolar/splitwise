@@ -888,9 +888,28 @@ const UserHeader = ({ user, onLogout }) => {
 
 const LoginPrompt = ({ onLogin, loading }) => {
   const googleButtonRef = useRef(null);
+  const [googleLoaded, setGoogleLoaded] = useState(false);
 
   useEffect(() => {
-    if (typeof google !== 'undefined' && google.accounts && googleButtonRef.current) {
+    // Check if Google library is already loaded
+    if (typeof google !== 'undefined' && google.accounts) {
+      setGoogleLoaded(true);
+      return;
+    }
+
+    // Wait for Google library to load
+    const checkGoogle = setInterval(() => {
+      if (typeof google !== 'undefined' && google.accounts) {
+        setGoogleLoaded(true);
+        clearInterval(checkGoogle);
+      }
+    }, 100);
+
+    return () => clearInterval(checkGoogle);
+  }, []);
+
+  useEffect(() => {
+    if (googleLoaded && googleButtonRef.current) {
       google.accounts.id.initialize({
         client_id: GOOGLE_CLIENT_ID,
         callback: onLogin
@@ -902,7 +921,7 @@ const LoginPrompt = ({ onLogin, loading }) => {
         width: 280
       });
     }
-  }, [onLogin]);
+  }, [googleLoaded, onLogin]);
 
   return (
     <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -912,6 +931,8 @@ const LoginPrompt = ({ onLogin, loading }) => {
       </p>
       {loading ? (
         <div className="text-center py-4 text-gray-500">Prihlasujem...</div>
+      ) : !googleLoaded ? (
+        <div className="text-center py-4 text-gray-400">Načítavam Google...</div>
       ) : (
         <div ref={googleButtonRef} className="flex justify-center"></div>
       )}
